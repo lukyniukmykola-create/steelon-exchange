@@ -1,0 +1,39 @@
+name: Daily currency rates to Telegram
+ 
+on:
+  schedule:
+    - cron: "0 6 * * *"   # 09:00 за київським часом (без урахування переходу на літній/зимовий час)
+  workflow_dispatch: {}    # дозволяє запустити вручну кнопкою "Run workflow"
+ 
+permissions:
+  contents: write
+ 
+jobs:
+  post-rates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+ 
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+ 
+      - name: Fetch rates and post to Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python fetch_and_post.py
+ 
+      - name: Save rates history for next run
+        run: |
+          git config user.name "rates-bot"
+          git config user.email "actions@github.com"
+          git add rates_history.json
+          git commit -m "Update rates history" || echo "No changes to commit"
+          git push
+        
