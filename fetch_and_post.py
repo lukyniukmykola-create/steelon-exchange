@@ -16,6 +16,10 @@ CHAT_ID = os.environ["CHAT_ID"]
 # Public preview of the exchange's Telegram channel - no login needed,
 # plain HTML, no JavaScript rendering required.
 TRUEEXCHANGE_CHANNEL_URL = "https://t.me/s/TrueExchange_IFUA"
+# Link shown to people reading the message (the channel itself, not the
+# scraped preview URL).
+TRUEEXCHANGE_LINK = "https://t.me/TrueExchange_IFUA"
+NBU_LINK = "https://bank.gov.ua/ua/markets/exchangerates"
 
 
 def load_history():
@@ -99,15 +103,18 @@ def build_message(trueexchange, nbu, history):
         if code in trueexchange:
             buy, sell = trueexchange[code]["buy"], trueexchange[code]["sell"]
             lines.append(
-                f"TrueExchange (Ів.-Франківськ): купівля {buy:.2f}{fmt_delta(buy, prev.get('buy'))}, "
+                f'<a href="{TRUEEXCHANGE_LINK}">TrueExchange</a> (Ів.-Франківськ): '
+                f"купівля {buy:.2f}{fmt_delta(buy, prev.get('buy'))}, "
                 f"продаж {sell:.2f}{fmt_delta(sell, prev.get('sell'))}"
             )
         else:
-            lines.append("TrueExchange: не вдалося отримати курс")
+            lines.append(f'<a href="{TRUEEXCHANGE_LINK}">TrueExchange</a>: не вдалося отримати курс')
 
         if code in nbu:
             rate = nbu[code]
-            lines.append(f"НБУ (офіційний): {rate:.4f}{fmt_delta(rate, prev.get('nbu'))}")
+            lines.append(
+                f'<a href="{NBU_LINK}">НБУ</a> (офіційний): {rate:.4f}{fmt_delta(rate, prev.get("nbu"))}'
+            )
 
             if code in trueexchange:
                 spread_buy = trueexchange[code]["buy"] - rate
@@ -124,7 +131,16 @@ def build_message(trueexchange, nbu, history):
 
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=15)
+    resp = requests.post(
+        url,
+        data={
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+        timeout=15,
+    )
     resp.raise_for_status()
 
 
