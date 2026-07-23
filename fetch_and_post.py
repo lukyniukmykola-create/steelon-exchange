@@ -33,9 +33,21 @@ async def fetch_trueobmin_rates():
     result = {}
     async with async_playwright() as p:
         browser = await p.chromium.launch()
-        page = await browser.new_page()
-        await page.goto("https://trueobmin.com/", wait_until="networkidle", timeout=60000)
-        # give the Vue widget extra time to populate the rates table
+        page = await browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        )
+        # "networkidle" never fires on this site (it keeps polling a crypto
+        # ticker in the background), so we wait for the DOM to load, then
+        # wait for the actual rates text to show up instead.
+        await page.goto("https://trueobmin.com/", wait_until="domcontentloaded", timeout=90000)
+        try:
+            await page.wait_for_selector("text=Купівля", timeout=30000)
+        except Exception:
+            pass  # fall through and try to parse whatever loaded anyway
+        # give the Vue widget extra time to finish populating the table
         await page.wait_for_timeout(4000)
         body_text = await page.inner_text("body")
         await browser.close()
