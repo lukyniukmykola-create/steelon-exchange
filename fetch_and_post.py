@@ -514,9 +514,15 @@ def merge_history(history, channels, channel_results, nbu):
     for channel in channels:
         username = channel["username"]
         rates, dates = channel_results.get(username, ({}, {}))
+        stored = {
+            code: entry
+            for code, entry in new_history["channels"].get(username, {}).items()
+            if code in CURRENCIES
+        }
         if not rates:
+            if stored:
+                new_history["channels"][username] = stored
             continue
-        stored = dict(new_history["channels"].get(username, {}))
         for code, entry in rates.items():
             stored[code] = dict(entry)
             stored[code]["date"] = dates.get(code) or today_str()
