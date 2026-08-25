@@ -2,54 +2,33 @@
   "version": 3,
   "channels": {
     "TrueExchange_IFUA": {
-      "USD": {
-        "buy": 44.65,
-        "sell": 44.85,
-        "date": "25.08.2026"
-      },
       "EUR": {
-        "sell": 52.1,
+        "sell": 52.05,
         "date": "25.08.2026"
       }
     },
     "futura_gate": {
-      "USD": {
-        "rate": 44.9,
-        "date": "25.08.2026"
-      },
       "EUR": {
         "rate": 52.4,
         "date": "25.08.2026"
       }
     },
     "spintechua": {
-      "USD": {
-        "rate": 44.9,
-        "date": "25.08.2026"
-      },
       "EUR": {
         "rate": 52.3,
         "date": "25.08.2026"
       }
     },
     "GANT_UA": {
-      "USD": {
-        "rate": 44.8,
-        "date": "24.08.2026"
-      },
       "EUR": {
         "rate": 52.0,
         "date": "24.08.2026"
       }
     },
     "alutech_kiev_ua": {
-      "USD": {
-        "rate": 44.93,
-        "date": "25.08.2026"
-      },
       "EUR": {
-        "rate": 52.42,
-        "date": "25.08.2026"
+        "rate": 52.35,
+        "date": "26.08.2026"
       }
     },
     "stankorlviv": {
@@ -65,8 +44,8 @@
       "date": "25.08.2026"
     },
     "EUR": {
-      "rate": 52.1594,
-      "date": "25.08.2026"
+      "rate": 52.0898,
+      "date": "26.08.2026"
     }
   },
   "meta": {
