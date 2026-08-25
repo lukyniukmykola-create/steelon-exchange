@@ -2,7 +2,7 @@ name: Daily currency rates to Telegram
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # 09:00 за київським часом (без урахування переходу на літній/зимовий час)
+    - cron: "0 8 * * *"   # 11:00 за київським часом (влітку EEST; взимку буде 10:00)
   workflow_dispatch: {}    # дозволяє запустити вручну кнопкою "Run workflow"
 
 permissions:

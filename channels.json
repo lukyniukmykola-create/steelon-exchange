@@ -1,0 +1,10 @@
+{
+  "channels": [
+    { "username": "TrueExchange_IFUA", "name": "TrueExchange (Ів.-Франківськ)", "url": "https://t.me/TrueExchange_IFUA" },
+    { "username": "futura_gate", "name": "Futura Gate", "url": "https://t.me/futura_gate" },
+    { "username": "spintechua", "name": "Spintech", "url": "https://t.me/spintechua" },
+    { "username": "GANT_UA", "name": "GANT", "url": "https://t.me/GANT_UA" },
+    { "username": "alutech_kiev_ua", "name": "Alutech (Київ)", "url": "https://t.me/alutech_kiev_ua", "mode": "formula", "formula": "nbu+0.5%", "note": "курс = НБУ +0,5%" },
+    { "username": "stankorlviv", "name": "Stankor (Львів)", "url": "https://t.me/stankorlviv", "mode": "photo", "note": "курс розпізнано з зображення" }
+  ]
+}
