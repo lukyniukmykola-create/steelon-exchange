@@ -384,7 +384,7 @@ def fmt_change(curr, prev):
     diff = curr - prev
     if abs(diff) < RATE_TOLERANCE:
         return ""
-    arrow = "🔺" if diff > 0 else "🔻"
+    arrow = "📈" if diff > 0 else "📉"
     return f" {arrow}{diff:+.2f}"
 
 
@@ -429,9 +429,7 @@ def build_message(channels, channel_results, nbu, prev_history):
             lines.append(fmt_entry(rates["EUR"], prev.get("EUR"), dates.get("EUR")))
         lines.append("")
 
-    lines.append("Продаж — курс, за яким можна купити EUR в обміннику.")
-    lines.append("Оновлюється автоматично протягом дня при зміні курсів.")
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
 
 
 def detect_changes(prev_history, new_history, channels):
@@ -448,7 +446,7 @@ def detect_changes(prev_history, new_history, channels):
                 if prev_history.get("channels"):
                     changes.append(f"• {name}: з'явився курс {new_value:.2f}")
             elif abs(new_value - old_value) >= RATE_TOLERANCE:
-                arrow = "🔺" if new_value > old_value else "🔻"
+                arrow = "📈" if new_value > old_value else "📉"
                 changes.append(
                     f"• {name}: {old_value:.2f} → {new_value:.2f} {arrow}{new_value - old_value:+.2f}"
                 )
