@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "channels": {
     "TrueExchange_IFUA": {
       "USD": {
@@ -8,7 +8,6 @@
         "date": "25.08.2026"
       },
       "EUR": {
-        "buy": 51.85,
         "sell": 52.1,
         "date": "25.08.2026"
       }
@@ -69,5 +68,10 @@
       "rate": 52.1594,
       "date": "25.08.2026"
     }
+  },
+  "meta": {
+    "message_id": 43,
+    "chat_id": "@steelonexchange",
+    "last_sent_date": "25.08.2026"
   }
 }
