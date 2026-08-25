@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import re
-import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -26,17 +25,19 @@ except Exception:
 
 HISTORY_FILE = "rates_history.json"
 CHANNELS_FILE = "channels.json"
-CURRENCIES = ["USD", "EUR"]
+CURRENCIES = ["EUR"]
 RATE_MIN = 1.0
 RATE_MAX = 200.0
+RATE_TOLERANCE = 0.005
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2
 CHANNEL_FETCH_PAUSE = 1.0
+PHOTO_OCR_MAX_IMAGES = 6
+PHOTO_RATE_MAX_DEVIATION = 0.10
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-TRUEEXCHANGE_CHANNEL_URL = "https://t.me/s/TrueExchange_IFUA"
 NBU_LINK = "https://bank.gov.ua/ua/markets/exchangerates"
 
 PAIR_PATTERNS = {
@@ -51,7 +52,6 @@ SINGLE_CODE_PATTERNS = {
     for code in CURRENCIES
 }
 SINGLE_SYMBOL_PATTERNS = {
-    "USD": re.compile(r"[$💵]\s*\$?\s*[—–-]?\s*(\d{1,4}[.,]\d{1,2})"),
     "EUR": re.compile(r"[€💸💶]\s*€?\s*[—–-]?\s*(\d{1,4}[.,]\d{1,2})"),
 }
 
@@ -81,21 +81,22 @@ def _request_with_retry(method, url, **kwargs):
 def load_history():
     if not os.path.exists(HISTORY_FILE):
         log.info("No history file found, starting fresh")
-        return {"version": 2, "channels": {}, "nbu": {}}
+        return {"version": 3, "channels": {}, "nbu": {}, "meta": {}}
     try:
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict) or "channels" not in data:
             log.info("Legacy history format detected, starting fresh")
-            return {"version": 2, "channels": {}, "nbu": {}}
+            return {"version": 3, "channels": {}, "nbu": {}, "meta": {}}
         data.setdefault("nbu", {})
         data.setdefault("channels", {})
-        data["version"] = 2
+        data.setdefault("meta", {})
+        data["version"] = 3
         log.info("Loaded history: %d channels", len(data["channels"]))
         return data
     except (json.JSONDecodeError, OSError) as exc:
         log.error("Failed to read history file, starting fresh: %s", exc)
-        return {"version": 2, "channels": {}, "nbu": {}}
+        return {"version": 3, "channels": {}, "nbu": {}, "meta": {}}
 
 
 def save_history(history):
@@ -136,12 +137,11 @@ def parse_pair(text, code):
     match = PAIR_PATTERNS[code].search(text)
     if not match:
         return None
-    buy = float(match.group(1).replace(",", "."))
     sell = float(match.group(2).replace(",", "."))
-    if not (_valid_rate(buy) and _valid_rate(sell)):
-        log.warning("Suspicious %s pair %.2f/%.2f ignored", code, buy, sell)
+    if not _valid_rate(sell):
+        log.warning("Suspicious %s sell rate %.2f ignored", code, sell)
         return None
-    return buy, sell
+    return sell
 
 
 def parse_single(text, code):
@@ -158,17 +158,28 @@ def parse_single(text, code):
 
 
 def parse_message_rates(text):
-    """Return {code: {'buy':..,'sell':..} or {'rate':..}} found in one message."""
+    """Return {code: {'sell': x} or {'rate': x}} found in one message."""
     result = {}
     for code in CURRENCIES:
-        pair = parse_pair(text, code)
-        if pair:
-            result[code] = {"buy": pair[0], "sell": pair[1]}
+        sell = parse_pair(text, code)
+        if sell is not None:
+            result[code] = {"sell": sell}
             continue
         single = parse_single(text, code)
         if single is not None:
             result[code] = {"rate": single}
     return result
+
+
+def _message_date(block, username):
+    time_tag = block.find("time")
+    if time_tag and time_tag.get("datetime"):
+        try:
+            posted = datetime.fromisoformat(time_tag["datetime"]).astimezone(KYIV_TZ)
+            return posted.strftime("%d.%m.%Y")
+        except ValueError:
+            log.warning("[%s] Unparseable message timestamp", username)
+    return None
 
 
 def fetch_channel_rates(username):
@@ -195,15 +206,7 @@ def fetch_channel_rates(username):
             continue
         text = text_div.get_text("\n")
         found = parse_message_rates(text)
-
-        time_tag = block.find("time")
-        posted = None
-        if time_tag and time_tag.get("datetime"):
-            try:
-                posted = datetime.fromisoformat(time_tag["datetime"]).astimezone(KYIV_TZ)
-            except ValueError:
-                log.warning("[%s] Unparseable message timestamp", username)
-        date_str = posted.strftime("%d.%m.%Y") if posted else None
+        date_str = _message_date(block, username)
 
         for code, entry in found.items():
             if code not in rates:
@@ -213,19 +216,18 @@ def fetch_channel_rates(username):
     if rates:
         summary = ", ".join(
             f"{code} " + (
-                f"{e['buy']:.2f}/{e['sell']:.2f}" if "buy" in e else f"{e['rate']:.2f}"
+                f"{e['sell']:.2f}" if "sell" in e else f"{e['rate']:.2f}"
             )
             for code, e in sorted(rates.items())
         )
         log.info("[%s] Rates: %s (dates: %s)", username, summary, dates)
     else:
-        log.warning("[%s] No USD/EUR rates found in recent messages", username)
+        log.warning("[%s] No EUR rates found in recent messages", username)
     return rates, dates
 
 
 _OCR_ENGINE = None
 _OCR_FAILED = False
-PHOTO_OCR_MAX_IMAGES = 6
 
 
 def _get_ocr_engine():
@@ -275,6 +277,7 @@ def fetch_channel_photo_rates(username, nbu_rates):
     soup = BeautifulSoup(resp.text, "html.parser")
     blocks = soup.find_all("div", class_="tgme_widget_message")
 
+    nbu_eur = (nbu_rates.get("EUR") or {}).get("rate")
     rates, dates = {}, {}
     images_done = 0
     for block in reversed(blocks):
@@ -283,14 +286,7 @@ def fetch_channel_photo_rates(username, nbu_rates):
         photos = block.find_all("a", class_="tgme_widget_message_photo_wrap")
         if not photos:
             continue
-        time_tag = block.find("time")
-        date_str = None
-        if time_tag and time_tag.get("datetime"):
-            try:
-                posted = datetime.fromisoformat(time_tag["datetime"]).astimezone(KYIV_TZ)
-                date_str = posted.strftime("%d.%m.%Y")
-            except ValueError:
-                pass
+        date_str = _message_date(block, username)
 
         for photo in photos:
             match = re.search(r"url\('([^']+)'\)", photo.get("style", ""))
@@ -310,30 +306,24 @@ def fetch_channel_photo_rates(username, nbu_rates):
             for t in texts:
                 numbers.extend(re.findall(r"\d{2}[.,]\d{1,2}", t))
 
-            symbol_codes = set()
-            joined = " ".join(texts).lower()
-            if "€" in joined or "eur" in joined or "євро" in joined:
-                symbol_codes.add("EUR")
-            if "$" in joined or "usd" in joined or "дол" in joined:
-                symbol_codes.add("USD")
-
+            has_usd = "$" in " ".join(texts) or "usd" in " ".join(texts).lower()
             for num in numbers:
                 value = float(num.replace(",", "."))
                 if not _valid_rate(value):
                     continue
-                code = next(iter(symbol_codes), None)
-                if code is None:
-                    code = min(
-                        CURRENCIES,
-                        key=lambda c: abs(value - nbu_rates.get(c, {}).get("rate", value)),
-                    )
-                if code in rates:
+                if nbu_eur and abs(value - nbu_eur) / nbu_eur > PHOTO_RATE_MAX_DEVIATION:
+                    log.warning("[%s] OCR value %.2f too far from NBU EUR, skipping",
+                                username, value)
                     continue
-                rates[code] = {"rate": value}
-                dates[code] = date_str or today_str()
-                log.info("[%s] OCR %s: %s=%.2f (posted %s)", username, code, num, value, date_str)
+                if "EUR" in rates:
+                    continue
+                if has_usd and not any("€" in t or "eur" in t.lower() for t in texts):
+                    continue
+                rates["EUR"] = {"rate": value}
+                dates["EUR"] = date_str or today_str()
+                log.info("[%s] OCR EUR: %s=%.2f (posted %s)", username, num, value, date_str)
 
-        if len(rates) == len(CURRENCIES):
+        if "EUR" in rates:
             break
 
     if not rates:
@@ -358,7 +348,7 @@ def compute_formula_rates(formula, nbu_rates):
 
 
 def fetch_nbu_rates():
-    """Official NBU reference rate for the same currencies."""
+    """Official NBU reference rate."""
     url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json"
     try:
         resp = _request_with_retry("GET", url, timeout=15)
@@ -384,122 +374,142 @@ def fetch_nbu_rates():
     return result
 
 
+def _entry_value(entry):
+    return entry.get("sell", entry.get("rate"))
+
+
 def fmt_change(curr, prev):
     if prev is None:
         return ""
     diff = curr - prev
-    if abs(diff) < 0.005:
-        return " (без змін)"
+    if abs(diff) < RATE_TOLERANCE:
+        return ""
     arrow = "🔺" if diff > 0 else "🔻"
     return f" {arrow}{diff:+.2f}"
 
 
 def fmt_entry(entry, prev_entry, entry_date):
-    """Format one currency entry with change markers and staleness warning."""
-    stale = bool(entry_date) and entry_date != today_str()
-    if "buy" in entry:
-        delta_buy = fmt_change(entry["buy"], prev_entry.get("buy") if prev_entry else None)
-        delta_sell = fmt_change(entry["sell"], prev_entry.get("sell") if prev_entry else None)
-        line = f"куп {entry['buy']:.2f}{delta_buy} / прод {entry['sell']:.2f}{delta_sell}"
-    else:
-        delta = fmt_change(entry["rate"], prev_entry.get("rate") if prev_entry else None)
-        line = f"{entry['rate']:.2f}{delta}"
-    if stale:
-        line += f" ⚠️старий курс (від {entry_date})"
+    """Format one currency entry: value + change marker + laconic update date."""
+    value = _entry_value(entry)
+    prev_value = _entry_value(prev_entry) if prev_entry else None
+    line = f"{value:.2f}{fmt_change(value, prev_value)}"
+    if entry_date and entry_date != today_str():
+        line += f" (від {entry_date})"
     return line
 
 
-def build_message(channels, channel_results, nbu, history):
-    names = {"USD": "💵 USD", "EUR": "💶 EUR"}
-    lines = [f"📊 Курси обмінників на {today_str()}", ""]
+def build_message(channels, channel_results, nbu, prev_history):
+    lines = [f"📊 Курс EUR (продаж) на {today_str()}", ""]
 
-    prev_nbu = history.get("nbu", {})
-    nbu_parts = []
-    for code in CURRENCIES:
-        if code in nbu:
-            rate = nbu[code]["rate"]
-            date = nbu[code].get("date") or today_str()
-            prev_rate = (prev_nbu.get(code) or {}).get("rate")
-            mark = "" if date == today_str() else f" ⚠️старий курс (від {date})"
-            nbu_parts.append(f"{names[code]} {rate:.4f}{fmt_change(rate, prev_rate)}{mark}")
-    lines.append(f'🏛 <a href="{NBU_LINK}">НБУ</a>: ' + " | ".join(nbu_parts))
-    lines.append("")
+    if "EUR" in nbu:
+        nbu_eur = nbu["EUR"]
+        date = nbu_eur.get("date") or today_str()
+        prev_rate = (prev_history.get("nbu", {}).get("EUR") or {}).get("rate")
+        mark = "" if date == today_str() else f" (від {date})"
+        lines.append(
+            f'🏛 <a href="{NBU_LINK}">НБУ</a>: {nbu_eur["rate"]:.2f}'
+            f"{fmt_change(nbu_eur['rate'], prev_rate)}{mark}"
+        )
+        lines.append("")
 
-    any_stale = False
     for channel in channels:
         username = channel["username"]
         name = channel.get("name", username)
         link = channel.get("url", f"https://t.me/{username}")
         rates, dates = channel_results.get(username, ({}, {}))
-        prev = history.get("channels", {}).get(username, {})
+        prev = prev_history.get("channels", {}).get(username, {})
 
         lines.append(f'<a href="{link}">{name}</a>')
         note = channel.get("note")
         if note and rates:
             lines.append(f"<i>{note}</i>")
         if not rates:
-            lines.append("❌ не вдалося отримати курс")
-        else:
-            lines.append("")
-        for code in CURRENCIES:
-            if code not in rates:
-                continue
-            entry_line = fmt_entry(rates[code], prev.get(code), dates.get(code))
-            if "⚠️" in entry_line:
-                any_stale = True
-            lines.append(f"{names[code]}: {entry_line}")
-            if "buy" in rates[code] and code in nbu:
-                spread_buy = rates[code]["buy"] - nbu[code]["rate"]
-                spread_sell = rates[code]["sell"] - nbu[code]["rate"]
-                lines.append(
-                    f"↳ різниця з НБУ: {spread_buy:+.2f} / {spread_sell:+.2f}"
-                )
+            lines.append("❌ немає даних")
+        elif "EUR" in rates:
+            lines.append(fmt_entry(rates["EUR"], prev.get("EUR"), dates.get("EUR")))
         lines.append("")
 
-    if any_stale:
-        lines.append("⚠️ «старий курс» — обмінник не публікував новий курс сьогодні.")
-    lines.append("Курси оновлюються щодня автоматично.")
+    lines.append("Продаж — курс, за яким можна купити EUR в обміннику.")
+    lines.append("Оновлюється автоматично протягом дня при зміні курсів.")
     return "\n".join(lines)
 
 
+def detect_changes(prev_history, new_history, channels):
+    """Return human-readable list of rate changes between two history states."""
+    changes = []
+    names = {c["username"]: c.get("name", c["username"]) for c in channels}
+    for username, stored in new_history.get("channels", {}).items():
+        prev = prev_history.get("channels", {}).get(username, {})
+        for code, entry in stored.items():
+            new_value = _entry_value(entry)
+            old_value = _entry_value(prev.get(code) or {})
+            name = names.get(username, username)
+            if old_value is None:
+                if prev_history.get("channels"):
+                    changes.append(f"• {name}: з'явився курс {new_value:.2f}")
+            elif abs(new_value - old_value) >= RATE_TOLERANCE:
+                arrow = "🔺" if new_value > old_value else "🔻"
+                changes.append(
+                    f"• {name}: {old_value:.2f} → {new_value:.2f} {arrow}{new_value - old_value:+.2f}"
+                )
+    return changes
+
+
 def send_telegram_message(text):
+    """Send message, return its message_id (or None)."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    resp = _request_with_retry(
+        "POST",
+        url,
+        data={
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+        timeout=15,
+    )
+    body = resp.json()
+    if not body.get("ok"):
+        log.error("Telegram API error: %s", body.get("description", "?"))
+        raise RuntimeError(f"Telegram API error: {body.get('description')}")
+    log.info("Telegram message sent successfully")
+    return (body.get("result") or {}).get("message_id")
+
+
+def edit_telegram_message(message_id, text):
+    """Edit previously sent message. Returns True on success."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
     try:
         resp = _request_with_retry(
             "POST",
             url,
             data={
                 "chat_id": CHAT_ID,
+                "message_id": message_id,
                 "text": text,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             },
             timeout=15,
         )
-    except requests.RequestException as exc:
-        log.error("Failed to send Telegram message: %s", exc)
-        raise
-
-    try:
         body = resp.json()
-        if not isinstance(body, dict):
-            raise ValueError(f"Unexpected response type: {type(body).__name__}")
-        if not body.get("ok"):
-            error_code = body.get("error_code", "?")
-            description = body.get("description", "unknown")
-            log.error("Telegram API error %s: %s", error_code, description)
-            raise RuntimeError(f"Telegram API error {error_code}: {description}")
-    except (ValueError, KeyError) as exc:
-        log.warning("Could not parse Telegram response: %s", exc)
-
-    log.info("Telegram message sent successfully")
+        if body.get("ok"):
+            log.info("Telegram message %s edited successfully", message_id)
+            return True
+        log.warning("Edit failed for message %s: %s", message_id,
+                    body.get("description", "?"))
+    except (requests.RequestException, ValueError) as exc:
+        log.warning("Edit failed for message %s: %s", message_id, exc)
+    return False
 
 
 def merge_history(history, channels, channel_results, nbu):
     new_history = {
-        "version": 2,
+        "version": 3,
         "channels": dict(history.get("channels", {})),
         "nbu": dict(history.get("nbu", {})),
+        "meta": dict(history.get("meta", {})),
     }
     for channel in channels:
         username = channel["username"]
@@ -532,8 +542,15 @@ def main(dry_run=False):
     for channel in channels:
         username = channel["username"]
         mode = channel.get("mode", "text")
+        note = channel.get("note")
         if mode == "formula":
-            rates, dates = compute_formula_rates(channel.get("formula", ""), nbu)
+            rates, dates = fetch_channel_rates(username)
+            if rates:
+                channel = dict(channel)
+                channel["note"] = None
+                log.info("[%s] Own rates found, formula not used", username)
+            else:
+                rates, dates = compute_formula_rates(channel.get("formula", ""), nbu)
         elif mode == "photo":
             rates, dates = fetch_channel_photo_rates(username, nbu)
         else:
@@ -541,27 +558,46 @@ def main(dry_run=False):
         channel_results[username] = (rates, dates)
         time.sleep(CHANNEL_FETCH_PAUSE)
 
-    got_any = any(rates for rates, _ in channel_results.values())
-    if not got_any and not nbu:
-        log.error("No data at all from any source. Aborting.")
-        raise SystemExit(1)
-
-    message = build_message(channels, channel_results, nbu, history)
+    new_history = merge_history(history, channels, channel_results, nbu)
+    changes = detect_changes(history, new_history, channels)
 
     if dry_run:
         print("=" * 50)
-        print(message)
+        print(build_message(channels, channel_results, nbu, history))
+        print("-" * 50)
+        print("Changes:", changes if changes else "none")
         print("=" * 50)
         log.info("Dry run finished, message not sent")
         return
 
-    send_telegram_message(message)
-    save_history(merge_history(history, channels, channel_results, nbu))
+    meta = history.get("meta", {})
+    sent_today = meta.get("last_sent_date") == today_str()
+
+    if sent_today and not changes:
+        log.info("No changes since last send, staying silent")
+        save_history(new_history)
+        return
+
+    table = build_message(channels, channel_results, nbu, history)
+
+    if sent_today and meta.get("message_id") and str(meta.get("chat_id")) == str(CHAT_ID):
+        if edit_telegram_message(meta["message_id"], table):
+            if changes:
+                send_telegram_message("🔄 Оновлення курсів:\n" + "\n".join(changes))
+        else:
+            meta["message_id"] = send_telegram_message(table)
+    else:
+        meta["message_id"] = send_telegram_message(table)
+
+    meta["chat_id"] = CHAT_ID
+    meta["last_sent_date"] = today_str()
+    new_history["meta"] = meta
+    save_history(new_history)
     log.info("Done")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Daily currency rates to Telegram")
+    parser = argparse.ArgumentParser(description="EUR rates to Telegram")
     parser.add_argument("--dry-run", action="store_true",
                         help="fetch and print the message without sending or saving")
     args = parser.parse_args()
