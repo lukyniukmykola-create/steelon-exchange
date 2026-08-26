@@ -35,6 +35,14 @@ CHANNEL_FETCH_PAUSE = 1.0
 PHOTO_OCR_MAX_IMAGES = 6
 PHOTO_RATE_MAX_DEVIATION = 0.10
 
+# Publishing window in Kyiv time: hourly full-hour slots from FIRST_HOUR to LAST_HOUR.
+# GitHub Actions starts scheduled jobs 0-60 min late, so the workflow is scheduled
+# ~40 min early and the script itself waits for the exact slot.
+FIRST_HOUR = 9
+LAST_HOUR = 18
+SLOT_GRACE_MIN = 15
+MAX_WAIT_MIN = 50
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
@@ -58,6 +66,54 @@ SINGLE_SYMBOL_PATTERNS = {
 
 def today_str():
     return datetime.now(KYIV_TZ).strftime("%d.%m.%Y")
+
+
+def wait_for_slot(sent_today):
+    """Align this run to a full hour in Kyiv time.
+
+    The cron schedule fires early on purpose, because GitHub delays scheduled
+    workflows by tens of minutes. Returns False if this run should just exit.
+    """
+    now = datetime.now(KYIV_TZ)
+    first = now.replace(hour=FIRST_HOUR, minute=0, second=0, microsecond=0)
+    last = now.replace(hour=LAST_HOUR, minute=0, second=0, microsecond=0)
+
+    if now < first:
+        wait = (first - now).total_seconds()
+        if wait > MAX_WAIT_MIN * 60:
+            log.info("Too early for %02d:00 Kyiv (%.0f min to wait), skipping run",
+                     FIRST_HOUR, wait / 60)
+            return False
+        log.info("Waiting %.0f min until %02d:00 Kyiv", wait / 60, FIRST_HOUR)
+        time.sleep(wait)
+        return True
+
+    if now > last + timedelta(minutes=SLOT_GRACE_MIN):
+        log.info("Outside the publishing window (%s Kyiv), skipping run",
+                 now.strftime("%H:%M"))
+        return False
+
+    if not sent_today:
+        # Morning table still missing - publish as soon as possible.
+        log.info("Morning table not sent yet, running now (%s Kyiv)",
+                 now.strftime("%H:%M"))
+        return True
+
+    if now.minute <= SLOT_GRACE_MIN:
+        log.info("Within grace of the %02d:00 slot, running now", now.hour)
+        return True
+
+    nxt = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    if nxt > last:
+        log.info("No slot left today, skipping run")
+        return False
+    wait = (nxt - now).total_seconds()
+    if wait > MAX_WAIT_MIN * 60:
+        log.info("Next slot %02d:00 too far away, skipping run", nxt.hour)
+        return False
+    log.info("Waiting %.0f min until %02d:00 Kyiv", wait / 60, nxt.hour)
+    time.sleep(wait)
+    return True
 
 
 def _request_with_retry(method, url, **kwargs):
@@ -433,24 +489,58 @@ def build_message(channels, channel_results, nbu, prev_history):
 
 
 def detect_changes(prev_history, new_history, channels):
-    """Return human-readable list of rate changes between two history states."""
+    """Compare two history states.
+
+    Returns (changes, refreshed):
+      changes   - rate moves worth a separate "Оновлення курсів" post;
+      refreshed - the table text needs a refresh even without a rate move,
+                  e.g. a rate shown as "(від 25.08)" is now confirmed by
+                  today's post and that mark has to disappear.
+    """
     changes = []
+    refreshed = False
     names = {c["username"]: c.get("name", c["username"]) for c in channels}
+    had_history = bool(prev_history.get("channels"))
+
     for username, stored in new_history.get("channels", {}).items():
         prev = prev_history.get("channels", {}).get(username, {})
         for code, entry in stored.items():
             new_value = _entry_value(entry)
-            old_value = _entry_value(prev.get(code) or {})
+            prev_entry = prev.get(code) or {}
+            old_value = _entry_value(prev_entry)
             name = names.get(username, username)
             if old_value is None:
-                if prev_history.get("channels"):
+                if had_history:
                     changes.append(f"• {name}: з'явився курс {new_value:.2f}")
+                refreshed = True
             elif abs(new_value - old_value) >= RATE_TOLERANCE:
                 arrow = "📈" if new_value > old_value else "📉"
                 changes.append(
                     f"• {name}: {old_value:.2f} → {new_value:.2f} {arrow}{new_value - old_value:+.2f}"
                 )
-    return changes
+                refreshed = True
+            elif entry.get("date") != prev_entry.get("date"):
+                log.info("[%s] %s unchanged at %.2f, freshness %s -> %s",
+                         username, code, new_value,
+                         prev_entry.get("date"), entry.get("date"))
+                refreshed = True
+
+    for code, entry in new_history.get("nbu", {}).items():
+        prev_entry = prev_history.get("nbu", {}).get(code) or {}
+        old_rate = prev_entry.get("rate")
+        if old_rate is None:
+            refreshed = True
+        elif abs(entry["rate"] - old_rate) >= RATE_TOLERANCE:
+            arrow = "📈" if entry["rate"] > old_rate else "📉"
+            changes.append(
+                f"• НБУ: {old_rate:.2f} → {entry['rate']:.2f} "
+                f"{arrow}{entry['rate'] - old_rate:+.2f}"
+            )
+            refreshed = True
+        elif entry.get("date") != prev_entry.get("date"):
+            refreshed = True
+
+    return changes, refreshed
 
 
 def send_telegram_message(text):
@@ -525,6 +615,11 @@ def merge_history(history, channels, channel_results, nbu):
             stored[code] = dict(entry)
             stored[code]["date"] = dates.get(code) or today_str()
         new_history["channels"][username] = stored
+    new_history["nbu"] = {
+        code: entry
+        for code, entry in new_history["nbu"].items()
+        if code in CURRENCIES
+    }
     for code, nbu_entry in nbu.items():
         new_history["nbu"][code] = {
             "rate": nbu_entry["rate"],
@@ -533,13 +628,18 @@ def merge_history(history, channels, channel_results, nbu):
     return new_history
 
 
-def main(dry_run=False):
+def main(dry_run=False, no_wait=False):
     log.info("Starting currency rates bot")
 
     channels = load_channels()
     if not channels:
         raise SystemExit(1)
     history = load_history()
+
+    if not dry_run and not no_wait:
+        sent_today = history.get("meta", {}).get("last_sent_date") == today_str()
+        if not wait_for_slot(sent_today):
+            return
 
     nbu = fetch_nbu_rates()
     channel_results = {}
@@ -563,22 +663,23 @@ def main(dry_run=False):
         time.sleep(CHANNEL_FETCH_PAUSE)
 
     new_history = merge_history(history, channels, channel_results, nbu)
-    changes = detect_changes(history, new_history, channels)
+    changes, refreshed = detect_changes(history, new_history, channels)
 
     if dry_run:
         print("=" * 50)
         print(build_message(channels, channel_results, nbu, history))
         print("-" * 50)
         print("Changes:", changes if changes else "none")
+        print("Table needs refresh:", refreshed)
         print("=" * 50)
         log.info("Dry run finished, message not sent")
         return
 
-    meta = history.get("meta", {})
+    meta = dict(history.get("meta", {}))
     sent_today = meta.get("last_sent_date") == today_str()
 
-    if sent_today and not changes:
-        log.info("No changes since last send, staying silent")
+    if sent_today and not changes and not refreshed:
+        log.info("Nothing changed since last send, staying silent")
         save_history(new_history)
         return
 
@@ -604,9 +705,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="EUR rates to Telegram")
     parser.add_argument("--dry-run", action="store_true",
                         help="fetch and print the message without sending or saving")
+    parser.add_argument("--no-wait", action="store_true",
+                        help="skip waiting for the next full hour (manual runs)")
     args = parser.parse_args()
     try:
-        main(dry_run=args.dry_run)
+        main(dry_run=args.dry_run, no_wait=args.no_wait)
     except SystemExit:
         raise
     except Exception as exc:
