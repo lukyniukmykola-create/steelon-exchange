@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .rates_history_*.tmp
+.subscribers_*.tmp
+.env
+data/

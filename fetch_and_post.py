@@ -23,7 +23,9 @@ except Exception:
     log.warning("zoneinfo not available, falling back to fixed UTC+2/+3 handling")
     KYIV_TZ = timezone(timedelta(hours=2))
 
-HISTORY_FILE = "rates_history.json"
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+HISTORY_FILE = os.path.join(DATA_DIR, "rates_history.json")
+SUBSCRIBERS_FILE = os.path.join(DATA_DIR, "subscribers.json")
 CHANNELS_FILE = "channels.json"
 CURRENCIES = ["EUR"]
 RATE_MIN = 1.0
@@ -44,7 +46,8 @@ SLOT_GRACE_MIN = 15
 MAX_WAIT_MIN = 50
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+# CHAT_ID is kept for the existing GitHub Actions configuration.
+CHAT_ID = os.environ.get("CHAT_ID") or os.environ.get("STEELON_CHAT_ID")
 
 NBU_LINK = "https://bank.gov.ua/ua/markets/exchangerates"
 
@@ -158,8 +161,10 @@ def load_history():
 def save_history(history):
     tmp_path = None
     try:
+        os.makedirs(os.path.dirname(HISTORY_FILE) or ".", exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(
-            dir=".", prefix=".rates_history_", suffix=".tmp"
+            dir=os.path.dirname(HISTORY_FILE) or ".",
+            prefix=".rates_history_", suffix=".tmp"
         )
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
@@ -168,6 +173,40 @@ def save_history(history):
     except OSError as exc:
         log.error("Failed to save history: %s", exc)
         if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def load_subscribers():
+    """Return private chats that opted in to the once-a-day rate message."""
+    if not os.path.exists(SUBSCRIBERS_FILE):
+        return {"version": 1, "subscribers": {}}
+    try:
+        with open(SUBSCRIBERS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("subscriber data must be an object")
+        data.setdefault("version", 1)
+        data.setdefault("subscribers", {})
+        return data
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        log.error("Failed to load subscribers: %s", exc)
+        return {"version": 1, "subscribers": {}}
+
+
+def save_subscribers(data):
+    """Atomically persist daily-subscription state."""
+    os.makedirs(os.path.dirname(SUBSCRIBERS_FILE) or ".", exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(SUBSCRIBERS_FILE) or ".",
+        prefix=".subscribers_", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, SUBSCRIBERS_FILE)
+    except OSError:
+        if os.path.exists(tmp_path):
             os.remove(tmp_path)
         raise
 
@@ -454,8 +493,8 @@ def fmt_entry(entry, prev_entry, entry_date):
     return line
 
 
-def build_message(channels, channel_results, nbu, prev_history):
-    lines = [f"📊 Курс EUR (продаж) на {today_str()}", ""]
+def build_message(channels, channel_results, nbu, prev_history, report_date=None):
+    lines = [f"📊 Курс EUR (продаж) на {report_date or today_str()}", ""]
 
     if "EUR" in nbu:
         nbu_eur = nbu["EUR"]
@@ -486,6 +525,43 @@ def build_message(channels, channel_results, nbu, prev_history):
         lines.append("")
 
     return "\n".join(lines).rstrip()
+
+
+def build_cached_message(history=None):
+    """Build a table from the latest saved scan without scraping again.
+
+    This is deliberately fast enough for a Telegram button press.  The
+    background rate updater remains the single source that fetches channels.
+    """
+    history = history or load_history()
+    channels = load_channels()
+    channel_results = {}
+    for channel in channels:
+        username = channel["username"]
+        stored = history.get("channels", {}).get(username, {})
+        rates = {}
+        dates = {}
+        for code, entry in stored.items():
+            rates[code] = {key: value for key, value in entry.items() if key != "date"}
+            dates[code] = entry.get("date")
+        channel_results[username] = (rates, dates)
+
+    report_date = history.get("meta", {}).get("last_sent_date") or today_str()
+    message = build_message(
+        channels,
+        channel_results,
+        history.get("nbu", {}),
+        {},
+        report_date=report_date,
+    )
+    updated_at = history.get("meta", {}).get("last_updated_at")
+    if updated_at:
+        try:
+            updated = datetime.fromisoformat(updated_at).astimezone(KYIV_TZ)
+            message += f"\n\n<i>Останнє оновлення: {updated:%d.%m.%Y %H:%M} (Київ)</i>"
+        except ValueError:
+            pass
+    return message
 
 
 def detect_changes(prev_history, new_history, channels):
@@ -543,14 +619,17 @@ def detect_changes(prev_history, new_history, channels):
     return changes, refreshed
 
 
-def send_telegram_message(text):
+def send_telegram_message(text, chat_id=None):
     """Send message, return its message_id (or None)."""
+    target_chat_id = chat_id or CHAT_ID
+    if not BOT_TOKEN or not target_chat_id:
+        raise RuntimeError("BOT_TOKEN and target chat ID must be configured")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     resp = _request_with_retry(
         "POST",
         url,
         data={
-            "chat_id": CHAT_ID,
+            "chat_id": target_chat_id,
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
@@ -563,6 +642,39 @@ def send_telegram_message(text):
         raise RuntimeError(f"Telegram API error: {body.get('description')}")
     log.info("Telegram message sent successfully")
     return (body.get("result") or {}).get("message_id")
+
+
+def send_daily_subscriptions(text):
+    """Deliver the current table once per day to every opted-in private chat.
+
+    A blocked bot (Telegram 403) is removed automatically, so a failed chat
+    cannot stop delivery to other subscribers.
+    """
+    data = load_subscribers()
+    subscribers = data.get("subscribers", {})
+    changed = False
+    delivered = 0
+    for chat_id, subscriber in list(subscribers.items()):
+        if subscriber.get("last_sent_date") == today_str():
+            continue
+        try:
+            send_telegram_message("🔔 Щоденний курс\n\n" + text, chat_id=chat_id)
+        except (requests.RequestException, RuntimeError, ValueError) as exc:
+            message = str(exc).lower()
+            if "blocked" in message or "chat not found" in message or "403" in message:
+                log.info("Removing unavailable subscriber %s", chat_id)
+                subscribers.pop(chat_id, None)
+                changed = True
+            else:
+                log.warning("Could not deliver daily rate to %s: %s", chat_id, exc)
+            continue
+        subscriber["last_sent_date"] = today_str()
+        changed = True
+        delivered += 1
+    if changed:
+        save_subscribers(data)
+    if delivered:
+        log.info("Daily rate delivered to %d subscriber(s)", delivered)
 
 
 def edit_telegram_message(message_id, text):
@@ -677,13 +789,16 @@ def main(dry_run=False, no_wait=False, force=False):
 
     meta = dict(history.get("meta", {}))
     sent_today = meta.get("last_sent_date") == today_str()
+    meta["last_updated_at"] = datetime.now(KYIV_TZ).isoformat()
+    new_history["meta"] = meta
+
+    table = build_message(channels, channel_results, nbu, history)
 
     if sent_today and not changes and not refreshed and not force:
         log.info("Nothing changed since last send, staying silent")
         save_history(new_history)
+        send_daily_subscriptions(table)
         return
-
-    table = build_message(channels, channel_results, nbu, history)
 
     can_edit = (
         not force
@@ -706,6 +821,7 @@ def main(dry_run=False, no_wait=False, force=False):
     meta["last_sent_date"] = today_str()
     new_history["meta"] = meta
     save_history(new_history)
+    send_daily_subscriptions(table)
     log.info("Done")
 
 
