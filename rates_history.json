@@ -3,7 +3,7 @@
   "channels": {
     "TrueExchange_IFUA": {
       "EUR": {
-        "sell": 52.05,
+        "sell": 52.0,
         "date": "26.08.2026"
       }
     },
@@ -45,8 +45,8 @@
     }
   },
   "meta": {
-    "message_id": 45,
+    "message_id": 46,
     "chat_id": "@steelonexchange",
-    "last_sent_date": "25.08.2026"
+    "last_sent_date": "26.08.2026"
   }
 }
