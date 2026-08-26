@@ -9,20 +9,20 @@
     },
     "futura_gate": {
       "EUR": {
-        "rate": 52.4,
-        "date": "25.08.2026"
+        "rate": 52.3,
+        "date": "26.08.2026"
       }
     },
     "spintechua": {
       "EUR": {
-        "rate": 52.3,
-        "date": "25.08.2026"
+        "rate": 52.4,
+        "date": "26.08.2026"
       }
     },
     "GANT_UA": {
       "EUR": {
-        "rate": 52.0,
-        "date": "24.08.2026"
+        "rate": 52.4,
+        "date": "26.08.2026"
       }
     },
     "alutech_kiev_ua": {
@@ -33,8 +33,8 @@
     },
     "stankorlviv": {
       "EUR": {
-        "rate": 52.42,
-        "date": "25.08.2026"
+        "rate": 52.35,
+        "date": "26.08.2026"
       }
     }
   },
@@ -49,8 +49,8 @@
     }
   },
   "meta": {
-    "message_id": 43,
+    "message_id": 45,
     "chat_id": "@steelonexchange",
-    "last_sent_date": "25.08.2026"
+    "last_sent_date": "26.08.2026"
   }
 }
