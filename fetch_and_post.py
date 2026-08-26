@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -48,6 +49,14 @@ MAX_WAIT_MIN = 50
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 # CHAT_ID is kept for the existing GitHub Actions configuration.
 CHAT_ID = os.environ.get("CHAT_ID") or os.environ.get("STEELON_CHAT_ID")
+# Set AUTO_POST_STEELON=0 to keep the hourly scan but publish to the channel
+# only via the admin button in the bot.
+AUTO_POST_STEELON = os.environ.get("AUTO_POST_STEELON", "1").strip().lower() \
+    not in {"0", "false", "no", "off"}
+
+# The bot thread (button presses) and the updater thread (daily delivery) both
+# touch the subscribers file, so every read-modify-write goes through this lock.
+_SUBSCRIBERS_LOCK = threading.RLock()
 
 NBU_LINK = "https://bank.gov.ua/ua/markets/exchangerates"
 
@@ -138,11 +147,19 @@ def _request_with_retry(method, url, **kwargs):
 
 
 def load_history():
-    if not os.path.exists(HISTORY_FILE):
-        log.info("No history file found, starting fresh")
-        return {"version": 3, "channels": {}, "nbu": {}, "meta": {}}
+    path = HISTORY_FILE
+    if not os.path.exists(path):
+        # First start with DATA_DIR pointing at an empty volume: fall back to the
+        # copy shipped in the repo so the buttons show a table straight away.
+        seed = "rates_history.json"
+        if os.path.abspath(seed) != os.path.abspath(path) and os.path.exists(seed):
+            log.info("No history in DATA_DIR yet, seeding from %s", seed)
+            path = seed
+        else:
+            log.info("No history file found, starting fresh")
+            return {"version": 3, "channels": {}, "nbu": {}, "meta": {}}
     try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict) or "channels" not in data:
             log.info("Legacy history format detected, starting fresh")
@@ -209,6 +226,22 @@ def save_subscribers(data):
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
         raise
+
+
+def set_subscription(chat_id, enabled):
+    """Add or remove one private chat from the daily delivery list."""
+    with _SUBSCRIBERS_LOCK:
+        data = load_subscribers()
+        subscribers = data["subscribers"]
+        key = str(chat_id)
+        if enabled:
+            entry = subscribers.setdefault(key, {})
+            # Clear the stamp so a fresh subscriber gets today's table.
+            entry.pop("last_sent_date", None)
+        else:
+            subscribers.pop(key, None)
+        save_subscribers(data)
+        return enabled
 
 
 def load_channels():
@@ -493,7 +526,8 @@ def fmt_entry(entry, prev_entry, entry_date):
     return line
 
 
-def build_message(channels, channel_results, nbu, prev_history, report_date=None):
+def build_message(channels, channel_results, nbu, prev_history, report_date=None,
+                  notes=None):
     lines = [f"📊 Курс EUR (продаж) на {report_date or today_str()}", ""]
 
     if "EUR" in nbu:
@@ -515,7 +549,9 @@ def build_message(channels, channel_results, nbu, prev_history, report_date=None
         prev = prev_history.get("channels", {}).get(username, {})
 
         lines.append(f'<a href="{link}">{name}</a>')
-        note = channel.get("note")
+        # notes[username] wins: a formula channel that posted its own rate must
+        # not still claim "курс = НБУ +0,5%".
+        note = (notes or {}).get(username, channel.get("note"))
         if note and rates:
             lines.append(f"<i>{note}</i>")
         if not rates:
@@ -546,15 +582,17 @@ def build_cached_message(history=None):
             dates[code] = entry.get("date")
         channel_results[username] = (rates, dates)
 
-    report_date = history.get("meta", {}).get("last_sent_date") or today_str()
+    meta = history.get("meta", {})
+    report_date = meta.get("last_sent_date") or today_str()
     message = build_message(
         channels,
         channel_results,
         history.get("nbu", {}),
         {},
         report_date=report_date,
+        notes=meta.get("notes"),
     )
-    updated_at = history.get("meta", {}).get("last_updated_at")
+    updated_at = meta.get("last_updated_at")
     if updated_at:
         try:
             updated = datetime.fromisoformat(updated_at).astimezone(KYIV_TZ)
@@ -650,8 +688,13 @@ def send_daily_subscriptions(text):
     A blocked bot (Telegram 403) is removed automatically, so a failed chat
     cannot stop delivery to other subscribers.
     """
-    data = load_subscribers()
-    subscribers = data.get("subscribers", {})
+    with _SUBSCRIBERS_LOCK:
+        data = load_subscribers()
+        subscribers = data.get("subscribers", {})
+        pending = [cid for cid, sub in subscribers.items()
+                   if sub.get("last_sent_date") != today_str()]
+    if not pending:
+        return
     changed = False
     delivered = 0
     for chat_id, subscriber in list(subscribers.items()):
@@ -672,7 +715,8 @@ def send_daily_subscriptions(text):
         changed = True
         delivered += 1
     if changed:
-        save_subscribers(data)
+        with _SUBSCRIBERS_LOCK:
+            save_subscribers(data)
     if delivered:
         log.info("Daily rate delivered to %d subscriber(s)", delivered)
 
@@ -755,15 +799,15 @@ def main(dry_run=False, no_wait=False, force=False):
 
     nbu = fetch_nbu_rates()
     channel_results = {}
+    notes = {}
     for channel in channels:
         username = channel["username"]
         mode = channel.get("mode", "text")
-        note = channel.get("note")
+        notes[username] = channel.get("note")
         if mode == "formula":
             rates, dates = fetch_channel_rates(username)
             if rates:
-                channel = dict(channel)
-                channel["note"] = None
+                notes[username] = None
                 log.info("[%s] Own rates found, formula not used", username)
             else:
                 rates, dates = compute_formula_rates(channel.get("formula", ""), nbu)
@@ -779,7 +823,7 @@ def main(dry_run=False, no_wait=False, force=False):
 
     if dry_run:
         print("=" * 50)
-        print(build_message(channels, channel_results, nbu, history))
+        print(build_message(channels, channel_results, nbu, history, notes=notes))
         print("-" * 50)
         print("Changes:", changes if changes else "none")
         print("Table needs refresh:", refreshed)
@@ -790,9 +834,16 @@ def main(dry_run=False, no_wait=False, force=False):
     meta = dict(history.get("meta", {}))
     sent_today = meta.get("last_sent_date") == today_str()
     meta["last_updated_at"] = datetime.now(KYIV_TZ).isoformat()
+    meta["notes"] = notes
     new_history["meta"] = meta
 
-    table = build_message(channels, channel_results, nbu, history)
+    table = build_message(channels, channel_results, nbu, history, notes=notes)
+
+    if not AUTO_POST_STEELON and not force:
+        log.info("AUTO_POST_STEELON is off: refreshed data only, channel untouched")
+        save_history(new_history)
+        send_daily_subscriptions(table)
+        return
 
     if sent_today and not changes and not refreshed and not force:
         log.info("Nothing changed since last send, staying silent")

@@ -1,7 +1,13 @@
 services:
   steelon-bot:
     build: .
+    container_name: steelon-bot
     env_file: .env
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

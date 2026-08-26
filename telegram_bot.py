@@ -81,15 +81,8 @@ def current_table():
 
 
 def change_subscription(chat_id, enabled):
-    data = rates.load_subscribers()
-    subscribers = data["subscribers"]
-    key = str(chat_id)
-    if enabled:
-        subscribers.setdefault(key, {})
-        data["subscribers"][key].pop("last_sent_date", None)
-    else:
-        subscribers.pop(key, None)
-    rates.save_subscribers(data)
+    """Delegate to the locked helper so the updater thread cannot clobber us."""
+    rates.set_subscription(chat_id, enabled)
 
 
 def handle_callback(callback):
@@ -134,18 +127,43 @@ def handle_callback(callback):
         send_message(chat_id, "Щоденну розсилку вимкнено.", menu=True)
 
 
+COMMANDS = {"/start", "/menu", "/help"}
+
+
+def parse_command(text):
+    """Return the bare command, or None. Handles '/start@SteelonBot' and empty text."""
+    if not text:
+        return None
+    word = text.split(maxsplit=1)[0].lower()
+    if not word.startswith("/"):
+        return None
+    command = word.split("@", 1)[0]
+    return command if command in COMMANDS else None
+
+
 def handle_update(update):
     if "callback_query" in update:
         handle_callback(update["callback_query"])
         return
-    message = update.get("message") or {}
-    text = (message.get("text") or "").strip()
-    chat_id = message.get("chat", {}).get("id")
-    if chat_id and text.split(maxsplit=1)[0].lower() in {"/start", "/menu", "/help"}:
-        if message.get("chat", {}).get("type") == "private":
+    message = update.get("message") or update.get("edited_message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    if not chat_id:
+        return
+    # Stickers, photos and service messages carry no text at all.
+    text = (message.get("text") or message.get("caption") or "").strip()
+    is_private = chat.get("type") == "private"
+
+    if parse_command(text):
+        if is_private:
             show_menu(chat_id)
         else:
             send_message(chat_id, "Відкрийте бота в особистих повідомленнях і натисніть /start.")
+        return
+
+    # Any other private message: show the menu instead of staying silent.
+    if is_private:
+        show_menu(chat_id)
 
 
 def poll_forever():
