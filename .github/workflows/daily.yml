@@ -2,21 +2,31 @@ name: Daily currency rates to Telegram
 
 on:
   schedule:
-    - cron: "0 6-15 * * *"   # щогодини 09:00-18:00 за Києвом (влітку); ранкова таблиця завжди, далі - тільки при змінах
+    # Запуск на ~40 хв раніше потрібного слоту: GitHub стартує заплановані
+    # воркфлоу із затримкою до години. Скрипт сам чекає рівної години
+    # за Києвом (09:00-18:00) і сам відсіює зайві запуски, тому діапазон
+    # 4-15 UTC покриває і літній, і зимовий час.
+    - cron: "20 4-15 * * *"
   workflow_dispatch: {}    # дозволяє запустити вручну кнопкою "Run workflow"
 
 permissions:
   contents: write
 
+concurrency:
+  group: rates-post
+  cancel-in-progress: false
+
 jobs:
   post-rates:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -25,12 +35,17 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python fetch_and_post.py
+        run: python fetch_and_post.py ${{ github.event_name == 'workflow_dispatch' && '--no-wait' || '' }}
 
       - name: Save rates history for next run
         run: |
           git config user.name "rates-bot"
           git config user.email "actions@github.com"
           git add rates_history.json
-          git commit -m "Update rates history" || echo "No changes to commit"
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Update rates history"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
           git push
