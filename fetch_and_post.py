@@ -628,7 +628,7 @@ def merge_history(history, channels, channel_results, nbu):
     return new_history
 
 
-def main(dry_run=False, no_wait=False):
+def main(dry_run=False, no_wait=False, force=False):
     log.info("Starting currency rates bot")
 
     channels = load_channels()
@@ -636,7 +636,7 @@ def main(dry_run=False, no_wait=False):
         raise SystemExit(1)
     history = load_history()
 
-    if not dry_run and not no_wait:
+    if not dry_run and not no_wait and not force:
         sent_today = history.get("meta", {}).get("last_sent_date") == today_str()
         if not wait_for_slot(sent_today):
             return
@@ -678,20 +678,28 @@ def main(dry_run=False, no_wait=False):
     meta = dict(history.get("meta", {}))
     sent_today = meta.get("last_sent_date") == today_str()
 
-    if sent_today and not changes and not refreshed:
+    if sent_today and not changes and not refreshed and not force:
         log.info("Nothing changed since last send, staying silent")
         save_history(new_history)
         return
 
     table = build_message(channels, channel_results, nbu, history)
 
-    if sent_today and meta.get("message_id") and str(meta.get("chat_id")) == str(CHAT_ID):
+    can_edit = (
+        not force
+        and sent_today
+        and meta.get("message_id")
+        and str(meta.get("chat_id")) == str(CHAT_ID)
+    )
+    if can_edit:
         if edit_telegram_message(meta["message_id"], table):
             if changes:
                 send_telegram_message("🔄 Оновлення курсів:\n" + "\n".join(changes))
         else:
             meta["message_id"] = send_telegram_message(table)
     else:
+        if force:
+            log.info("Force mode: sending a new table instead of editing")
         meta["message_id"] = send_telegram_message(table)
 
     meta["chat_id"] = CHAT_ID
@@ -707,9 +715,11 @@ if __name__ == "__main__":
                         help="fetch and print the message without sending or saving")
     parser.add_argument("--no-wait", action="store_true",
                         help="skip waiting for the next full hour (manual runs)")
+    parser.add_argument("--force", action="store_true",
+                        help="always post a new table, even without changes")
     args = parser.parse_args()
     try:
-        main(dry_run=args.dry_run, no_wait=args.no_wait)
+        main(dry_run=args.dry_run, no_wait=args.no_wait, force=args.force)
     except SystemExit:
         raise
     except Exception as exc:
