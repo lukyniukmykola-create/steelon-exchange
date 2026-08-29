@@ -3,51 +3,59 @@
   "channels": {
     "TrueExchange_IFUA": {
       "EUR": {
-        "sell": 52.0,
-        "date": "26.08.2026"
+        "sell": 51.95,
+        "date": "29.08.2026"
       }
     },
     "futura_gate": {
       "EUR": {
-        "rate": 52.3,
-        "date": "26.08.2026"
+        "rate": 52.2,
+        "date": "28.08.2026"
       }
     },
     "spintechua": {
       "EUR": {
-        "rate": 52.4,
-        "date": "26.08.2026"
+        "rate": 52.1,
+        "date": "28.08.2026"
       }
     },
     "GANT_UA": {
       "EUR": {
-        "rate": 52.4,
-        "date": "26.08.2026"
+        "rate": 52.1,
+        "date": "28.08.2026"
       }
     },
     "alutech_kiev_ua": {
       "EUR": {
-        "rate": 52.27,
-        "date": "27.08.2026"
+        "rate": 52.14,
+        "date": "31.08.2026"
       }
     },
     "stankorlviv": {
       "EUR": {
-        "rate": 52.35,
-        "date": "26.08.2026"
+        "rate": 52.12,
+        "date": "28.08.2026"
       }
     }
   },
   "nbu": {
     "EUR": {
-      "rate": 52.008,
-      "date": "27.08.2026"
+      "rate": 51.8804,
+      "date": "31.08.2026"
     }
   },
   "meta": {
-    "message_id": 46,
+    "message_id": 48,
     "chat_id": "@steelonexchange",
-    "last_sent_date": "26.08.2026",
-    "last_updated_at": "2026-08-26T17:00:28.971337+03:00"
+    "last_sent_date": "29.08.2026",
+    "last_updated_at": "2026-08-29T14:11:42.470738+03:00",
+    "notes": {
+      "TrueExchange_IFUA": null,
+      "futura_gate": null,
+      "spintechua": null,
+      "GANT_UA": null,
+      "alutech_kiev_ua": "курс = НБУ +0,5%",
+      "stankorlviv": "курс розпізнано з зображення"
+    }
   }
 }
