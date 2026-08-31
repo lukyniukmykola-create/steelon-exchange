@@ -1,0 +1,80 @@
+name: Daily currency rates to Telegram
+
+on:
+  # Основний тригер: зовнішній планувальник (cron-job.org) б'є в GitHub API
+  # рівно о потрібній хвилині за київським часом. Власний розклад GitHub
+  # ненадійний — запуски приходять із запізненням на годину або не приходять
+  # узагалі, тому він лишається тільки як підстраховка.
+  repository_dispatch:
+    types: [rates]
+
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Надіслати нову таблицю, навіть якщо курси не змінилися"
+        type: boolean
+        default: false
+
+  # Підстраховка на випадок, якщо зовнішній планувальник замовкне.
+  schedule:
+    - cron: "20 4-15 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rates-post
+  cancel-in-progress: false
+
+jobs:
+  post-rates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch rates and post to Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          ARGS=""
+          case "${{ github.event_name }}" in
+            repository_dispatch)
+              # Час уже вибрав зовнішній планувальник — публікуємо негайно.
+              ARGS="--no-wait"
+              ;;
+            workflow_dispatch)
+              ARGS="--no-wait"
+              if [ "${{ inputs.force }}" = "true" ]; then
+                ARGS="$ARGS --force"
+              fi
+              ;;
+            schedule)
+              # Запасний шлях: скрипт сам вирівнюється на рівну годину.
+              ARGS=""
+              ;;
+          esac
+          echo "Event: ${{ github.event_name }} | args: ${ARGS:-<none>}"
+          python fetch_and_post.py $ARGS
+
+      - name: Save rates history for next run
+        run: |
+          git config user.name "rates-bot"
+          git config user.email "actions@github.com"
+          git add rates_history.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Update rates history"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push
