@@ -3,8 +3,8 @@
   "channels": {
     "TrueExchange_IFUA": {
       "EUR": {
-        "sell": 52.1,
-        "date": "04.09.2026"
+        "sell": 52.05,
+        "date": "05.09.2026"
       }
     },
     "futura_gate": {
@@ -45,10 +45,10 @@
     }
   },
   "meta": {
-    "message_id": 57,
+    "message_id": 59,
     "chat_id": "@steelonexchange",
-    "last_sent_date": "04.09.2026",
-    "last_updated_at": "2026-09-04T17:00:11.480437+03:00",
+    "last_sent_date": "05.09.2026",
+    "last_updated_at": "2026-09-05T11:22:12.533648+03:00",
     "notes": {
       "TrueExchange_IFUA": null,
       "futura_gate": null,
