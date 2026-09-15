@@ -27,8 +27,8 @@
     },
     "alutech_kiev_ua": {
       "EUR": {
-        "rate": 51.78,
-        "date": "15.09.2026"
+        "rate": 51.77,
+        "date": "16.09.2026"
       }
     },
     "stankorlviv": {
@@ -40,15 +40,15 @@
   },
   "nbu": {
     "EUR": {
-      "rate": 51.5231,
-      "date": "15.09.2026"
+      "rate": 51.513,
+      "date": "16.09.2026"
     }
   },
   "meta": {
     "message_id": 73,
     "chat_id": "@steelonexchange",
     "last_sent_date": "15.09.2026",
-    "last_updated_at": "2026-09-15T12:29:14.552788+03:00",
+    "last_updated_at": "2026-09-15T18:01:40.721806+03:00",
     "notes": {
       "TrueExchange_IFUA": null,
       "futura_gate": null,
